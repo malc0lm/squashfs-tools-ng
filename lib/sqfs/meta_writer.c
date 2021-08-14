@@ -134,6 +134,7 @@ int sqfs_meta_writer_flush(sqfs_meta_writer_t *m)
 
 	memset(m->data, 0, sizeof(m->data));
 	m->offset = 0;
+	// 在当前文件里的location，
 	m->block_offset += count;
 	return ret;
 }
@@ -143,26 +144,29 @@ int sqfs_meta_writer_append(sqfs_meta_writer_t *m, const void *data,
 {
 	size_t diff;
 	int ret;
-
+	// 这个while是逐渐减小size值，以便于跨block写完数据
 	while (size != 0) {
+		// 当前的8192 还剩多少空间
 		diff = sizeof(m->data) - m->offset;
-
+		// 如果不剩直接flush 当前data数组
 		if (diff == 0) {
 			ret = sqfs_meta_writer_flush(m);
 			if (ret)
 				return ret;
+			// flush之后新分配了一个8192内存块
 			diff = sizeof(m->data);
 		}
-
+		// diff 大于需要的size空间
 		if (diff > size)
 			diff = size;
-
+		// 把size长的数据memcpy到data中
 		memcpy(m->data + m->offset, data, diff);
+		// 更新offset值 size值（因为有可能跨meta block 所以这个size可能是在上一个block尾部和下个block头部）
 		m->offset += diff;
 		size -= diff;
 		data = (const char *)data + diff;
 	}
-
+	// 如果offset == 8k 直接flush 分配新的metablock
 	if (m->offset == sizeof(m->data))
 		return sqfs_meta_writer_flush(m);
 

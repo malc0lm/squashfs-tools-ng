@@ -28,6 +28,8 @@
 static int write_block_sizes(sqfs_meta_writer_t *ir,
 			     const sqfs_inode_generic_t *n)
 {
+	// 为何不能直接写入一个 extra[]数据，而要变成size
+	// 是因为要要把数据全部转为little endian htole32 
 	sqfs_u32 *sizes;
 	size_t i;
 
@@ -92,11 +94,11 @@ int sqfs_meta_writer_write_inode(sqfs_meta_writer_t *ir,
 	base.gid_idx = htole16(n->base.gid_idx);
 	base.mod_time = htole32(n->base.mod_time);
 	base.inode_number = htole32(n->base.inode_number);
-
+	// 先把定长数据写进meta
 	ret = sqfs_meta_writer_append(ir, &base, sizeof(base));
 	if (ret)
 		return ret;
-
+	// 根据type 生成不同的body然后继续写入meta
 	switch (n->base.type) {
 	case SQFS_INODE_DIR: {
 		sqfs_inode_dir_t dir = {
@@ -111,6 +113,7 @@ int sqfs_meta_writer_write_inode(sqfs_meta_writer_t *ir,
 	case SQFS_INODE_FILE: {
 		sqfs_inode_file_t file = {
 			.blocks_start = htole32(n->data.file.blocks_start),
+			// 这里需要更新fragment index，因为合并后fragment table要重新生成
 			.fragment_index = htole32(n->data.file.fragment_index),
 			.fragment_offset =
 				htole32(n->data.file.fragment_offset),
@@ -119,6 +122,7 @@ int sqfs_meta_writer_write_inode(sqfs_meta_writer_t *ir,
 		ret = sqfs_meta_writer_append(ir, &file, sizeof(file));
 		if (ret)
 			return ret;
+		// 这里继续写入不定长的 block数组数据，之所以没有直接用extra是因为需要把数组里所有数据转为le
 		return write_block_sizes(ir, n);
 	}
 	case SQFS_INODE_SLINK: {

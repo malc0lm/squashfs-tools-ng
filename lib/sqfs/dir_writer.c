@@ -38,18 +38,27 @@ typedef struct index_ent_t {
 
 struct sqfs_dir_writer_t {
 	sqfs_object_t base;
-
+	// sqfs dir entry 数组
 	dir_entry_t *list;
+	// sqfs dir entry 数组尾节点
 	dir_entry_t *list_end;
 
-	index_ent_t *idx;
-	index_ent_t *idx_end;
 
+	// index entry: A list of directory index entries for faster lookup in the directory table
+	// it will index dir entry
+	index_ent_t *idx;
+	// index entry 数组尾节点
+	index_ent_t *idx_end;
+	// 目录索引位置？？？
 	sqfs_u64 dir_ref;
+	// 目录大小
 	size_t dir_size;
+	// entry总数
 	size_t ent_count;
+	// dir table metablock 分配器
 	sqfs_meta_writer_t *dm;
 
+	// apparate默认不需要export table
 	sqfs_u64 *export_tbl;
 	size_t export_tbl_max;
 	size_t export_tbl_count;
@@ -75,12 +84,13 @@ static void writer_reset(sqfs_dir_writer_t *writer)
 	dir_entry_t *ent;
 	index_ent_t *idx;
 
+	// writer reset逻辑，释放所有idx 链表
 	while (writer->idx != NULL) {
 		idx = writer->idx;
 		writer->idx = idx->next;
 		free(idx);
 	}
-
+	// writer reset逻辑，释放所有ent 链表
 	while (writer->list != NULL) {
 		ent = writer->list;
 		writer->list = ent->next;
@@ -185,10 +195,11 @@ int sqfs_dir_writer_begin(sqfs_dir_writer_t *writer, sqfs_u32 flags)
 
 	if (flags != 0)
 		return SQFS_ERROR_UNSUPPORTED;
-
+	// writer里所有链表和数据重置 
 	writer_reset(writer);
-
+	// 从全局一致的dir metablock 分配器里获取当前的block 和 offset
 	sqfs_meta_writer_get_position(writer->dm, &block, &offset);
+	// 设置 writer的dir_ref
 	writer->dir_ref = (block << 16) | offset;
 	return 0;
 }
@@ -199,63 +210,70 @@ int sqfs_dir_writer_add_entry(sqfs_dir_writer_t *writer, const char *name,
 {
 	dir_entry_t *ent;
 	int type, err;
-
+	// 普通类型，转换为sqfs类型，这里先默认都是非ext类型
 	type = get_type(mode);
 	if (type < 0)
 		return type;
 
 	if (name[0] == '\0' || inode_num < 1)
 		return SQFS_ERROR_ARG_INVALID;
-
+	// 没有export  table 跳过
 	err = add_export_table_entry(writer, inode_num, inode_ref);
 	if (err)
 		return err;
-
+	// 分配了一个 完整entry需要的空间（entry有name 所以不定长）
 	ent = alloc_flex(sizeof(*ent), 1, strlen(name));
 	if (ent == NULL)
 		return SQFS_ERROR_ALLOC;
 
+	// 给entry所有字段复制 包括不定长name
 	ent->inode_ref = inode_ref;
 	ent->inode_num = inode_num;
 	ent->type = type;
 	ent->name_len = strlen(name);
 	memcpy(ent->name, name, ent->name_len);
 
+	// 加入到链表（这里apparate可能会考虑用vec实现）
 	if (writer->list_end == NULL) {
 		writer->list = writer->list_end = ent;
 	} else {
 		writer->list_end->next = ent;
 		writer->list_end = ent;
 	}
-
+	// 长度ent_count自增1
 	writer->ent_count += 1;
 	return 0;
 }
 
+// 应该是当前的metadata block 还能放后面多少个entry，因为entry不定长里面有name，必须逐个比较
 static size_t get_conseq_entry_count(sqfs_u32 offset, dir_entry_t *head)
 {
 	size_t size, count = 0;
 	dir_entry_t *it;
 	sqfs_s32 diff;
-
+	// 在某个block的offset+12字节的dir header 取余 8k
+	// 那这个size 在8192-12以内 肯定是取余完还是自己，在8192-12 - 8192以内取余完 还剩很小 12字节以内
 	size = (offset + sizeof(sqfs_dir_header_t)) % SQFS_META_BLOCK_SIZE;
 
+	// 开始对每个entry遍历
 	for (it = head; it != NULL; it = it->next) {
+		// inode_ref 什么含义？？？ 右移16位 和 头对比有什么作用？？？
 		if ((it->inode_ref >> 16) != (head->inode_ref >> 16))
 			break;
-
+		// 计算当前和头结点inode 差异
 		diff = it->inode_num - head->inode_num;
-
+		// 超过32767 终止
 		if (diff > 32767 || diff < -32767)
 			break;
-
+		// size就会继续加上 当前entry的长度。
 		size += sizeof(sqfs_dir_entry_t) + it->name_len;
 
+		// 如果当有了count 且size超过了 8k 那就会break
 		if (count > 0 && size > SQFS_META_BLOCK_SIZE)
 			break;
-
+		// 这里 加完size count自增1
 		count += 1;
-
+		// count 超过256 也会break，单个dir header只能有256个entry
 		if (count == SQFS_MAX_DIR_ENT)
 			break;
 	}
@@ -269,21 +287,25 @@ static int add_header(sqfs_dir_writer_t *writer, size_t count,
 	sqfs_dir_header_t hdr;
 	index_ent_t *idx;
 	int err;
-
+	// 为什么count - 1？
 	hdr.count = htole32(count - 1);
+	// 赋值起始metablock
 	hdr.start_block = htole32(ref->inode_ref >> 16);
+	// dir首个entry的inode_number
 	hdr.inode_number = htole32(ref->inode_num);
-
+	// 把header写入内存的metablock
 	err = sqfs_meta_writer_append(writer->dm, &hdr, sizeof(hdr));
 	if (err)
 		return err;
-
+	// 这里开始 有了dir index 操作，但是apparate应该用不到dir index 这个只是加速索引
 	idx = calloc(1, sizeof(*idx));
 	if (idx == NULL)
 		return SQFS_ERROR_ALLOC;
 
 	idx->ent = ref;
 	idx->block = block;
+	// index 是This stores a byte offset from the first directory header to the current header
+	// 即 第一个header 到当前的header有多少字节偏移
 	idx->index = writer->dir_size;
 
 	if (writer->idx_end == NULL) {
@@ -296,7 +318,8 @@ static int add_header(sqfs_dir_writer_t *writer, size_t count,
 	writer->dir_size += sizeof(hdr);
 	return 0;
 }
-
+// writer_end 就是把所有entry写入dm，包括生成的header和entry中不定长的name
+// 如果跨metablock或者单个metablock里太多了，那就新生成header
 int sqfs_dir_writer_end(sqfs_dir_writer_t *writer)
 {
 	dir_entry_t *it, *first;
@@ -306,36 +329,43 @@ int sqfs_dir_writer_end(sqfs_dir_writer_t *writer)
 	sqfs_u32 offset;
 	sqfs_u64 block;
 	int err;
-
+	// 这里之所有没有逐个遍历，应该是一次性放完 count个，而不是逐个放置。所以因该是 it=it.next(count次)
+	// 实际上这里只有全部entry，header是根据需要自己生成的
 	for (it = writer->list; it != NULL; ) {
+		//  依然是找到现在dm 已分配后的block offset
+		// 这个block 和offset就是 已经是第几个block了，在这个block里用了多少了从哪起始
 		sqfs_meta_writer_get_position(writer->dm, &block, &offset);
+		// 计算当前的metadata block 还能放后面多少个entry，因为entry不定长里面有name，必须逐个比较
 		count = get_conseq_entry_count(offset, it);
-
+		// 添加dir header 传入首个entry，count，metablock
 		err = add_header(writer, count, it, block);
 		if (err)
 			return err;
-
+		// 当前这个header下的first entry
 		first = it;
-
+		// 这里开始向header里写入最大的entry
 		for (i = 0; i < count; ++i) {
+			// 每个entry的offset是指向inode table数据
 			ent.offset = htole16(it->inode_ref & 0x0000FFFF);
 			ent.inode_diff = it->inode_num - first->inode_num;
 			ent.type = htole16(it->type);
 			ent.size = htole16(it->name_len - 1);
-
+			// 给这个diff_16赋值的意义是？
 			diff_u16 = (sqfs_u16 *)&ent.inode_diff;
 			*diff_u16 = htole16(*diff_u16);
 
+
+			// 加个entry头
 			err = sqfs_meta_writer_append(writer->dm, &ent,
 						      sizeof(ent));
 			if (err)
 				return err;
-
+			// 加个entry中的name（不定长）
 			err = sqfs_meta_writer_append(writer->dm, it->name,
 						      it->name_len);
 			if (err)
 				return err;
-
+			// dir_dize 就是累加所有entry 和header的uncompress长度
 			writer->dir_size += sizeof(ent) + it->name_len;
 			it = it->next;
 		}
@@ -393,9 +423,12 @@ sqfs_inode_generic_t
 		return NULL;
 
 	inode->payload_bytes_available = index_size;
+	// writer->dir_ref 只有在每个dir writer 初始化的时候从dm分配器中根据block和offset计算出来
 	start_block = writer->dir_ref >> 16;
 	block_offset = writer->dir_ref & 0xFFFF;
 
+	// apparate 这里需要做的是 虽然是扩展dir ext dir，但是不去计算inode index
+	// 作为TODO项，性能优化
 	if (xattr != 0xFFFFFFFF || start_block > 0xFFFFFFFFUL ||
 	    writer->dir_size > 0xFFFF) {
 		inode->base.type = SQFS_INODE_EXT_DIR;

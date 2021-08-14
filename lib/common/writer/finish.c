@@ -95,6 +95,7 @@ int sqfs_writer_finish(sqfs_writer_t *sqfs, const sqfs_writer_cfg_t *cfg)
 	if (!cfg->quiet)
 		fputs("Waiting for remaining data blocks...\n", stdout);
 
+	// 先处理 data block
 	ret = sqfs_block_processor_finish(sqfs->data);
 	if (ret) {
 		sqfs_perror(cfg->filename, "finishing data blocks", ret);
@@ -106,12 +107,16 @@ int sqfs_writer_finish(sqfs_writer_t *sqfs, const sqfs_writer_cfg_t *cfg)
 
 	sqfs->super.inode_count = sqfs->fs.unique_inode_count;
 
+	// 序列化fstree 到 inode table 和 dir table
+	// 1. 是否只需要用fstree 元数据就可以完整序列化inode table 和dir table，如果直接有sqfs inode节点是不是更方便：是的省去转化的过程
+	// 2. 现在内存序列化，后面一次性写完？？？
 	if (sqfs_serialize_fstree(cfg->filename, sqfs))
 		return -1;
 
 	if (!cfg->quiet)
 		fputs("Writing fragment table...\n", stdout);
 
+    // 写 fragment table，这里在apparate里要重新计算！！！
 	ret = sqfs_frag_table_write(sqfs->fragtbl, sqfs->outfile,
 				    &sqfs->super, sqfs->cmp);
 	if (ret) {
@@ -136,6 +141,7 @@ int sqfs_writer_finish(sqfs_writer_t *sqfs, const sqfs_writer_cfg_t *cfg)
 	if (!cfg->quiet)
 		fputs("Writing ID table...\n", stdout);
 
+	// 写id table 同样重新计算！！！
 	ret = sqfs_id_table_write(sqfs->idtbl, sqfs->outfile,
 				  &sqfs->super, sqfs->cmp);
 	if (ret) {
@@ -146,7 +152,7 @@ int sqfs_writer_finish(sqfs_writer_t *sqfs, const sqfs_writer_cfg_t *cfg)
 	if (!cfg->no_xattr) {
 		if (!cfg->quiet)
 			fputs("Writing extended attributes...\n", stdout);
-
+		// 写 xattr  table 重新计算！！！
 		ret = sqfs_xattr_writer_flush(sqfs->xwr, sqfs->outfile,
 					      &sqfs->super, sqfs->cmp);
 		if (ret) {
